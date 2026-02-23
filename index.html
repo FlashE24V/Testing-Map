@@ -70,6 +70,43 @@
     .bolt-dotlot { background: #6b7280; }
 
     .leaflet-div-icon { background: transparent; border: none; }
+
+    /* ======================
+       NEW: Address search / location UI
+       ====================== */
+    .search-ctl {
+      background: white;
+      padding: 8px 10px;
+      border-radius: 10px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.25);
+      font: 13px/1.2 system-ui, -apple-system, Arial, sans-serif;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .search-ctl input {
+      width: 240px;
+      max-width: 60vw;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+      outline: none;
+      font-size: 13px;
+    }
+    .search-ctl button {
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+      background: #111;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .search-ctl button.secondary {
+      background: #fff;
+      color: #111;
+    }
   </style>
 </head>
 <body>
@@ -79,6 +116,140 @@
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
+
+    // ======================
+    // NEW: USER LOCATION + ADDRESS SEARCH (SAFE / ISOLATED)
+    // ======================
+    var userLocationLayer = L.layerGroup().addTo(map);
+
+    function clearUserLocation() {
+      userLocationLayer.clearLayers();
+    }
+
+    function setUserLocation(lat, lon, label, accuracyMeters) {
+      clearUserLocation();
+
+      var marker = L.marker([lat, lon]).addTo(userLocationLayer);
+      marker.bindPopup(label || 'Selected location').openPopup();
+
+      if (typeof accuracyMeters === 'number' && isFinite(accuracyMeters) && accuracyMeters > 0) {
+        L.circle([lat, lon], { radius: accuracyMeters }).addTo(userLocationLayer);
+      }
+
+      map.setView([lat, lon], 14);
+    }
+
+    function locateMeSafe() {
+      try {
+        if (!navigator.geolocation) {
+          alert("Geolocation isn't supported by this browser.");
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          function(pos) {
+            setUserLocation(
+              pos.coords.latitude,
+              pos.coords.longitude,
+              '📍 Your location',
+              pos.coords.accuracy
+            );
+          },
+          function(err) {
+            console.warn('Geolocation error:', err);
+            alert("Couldn't get your location. Make sure this page is served over HTTPS (GitHub Pages) or localhost, and allow location permissions.");
+          },
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+        );
+      } catch (e) {
+        console.error('Locate exception:', e);
+      }
+    }
+
+    function cleanStr(v) {
+      if (v === undefined || v === null) return '';
+      return ('' + v).trim();
+    }
+
+    function searchAddressSafe(query) {
+      try {
+        var q = cleanStr(query);
+        if (!q) return;
+
+        var url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
+
+        fetch(url)
+          .then(function(r){ return r.json(); })
+          .then(function(results){
+            if (!results || !results.length) {
+              alert("Couldn't find that location. Try a more specific address.");
+              return;
+            }
+            var hit = results[0];
+            var lat = parseFloat(hit.lat);
+            var lon = parseFloat(hit.lon);
+
+            if (!isFinite(lat) || !isFinite(lon)) {
+              alert('Search returned invalid coordinates.');
+              return;
+            }
+
+            setUserLocation(lat, lon, hit.display_name);
+          })
+          .catch(function(err){
+            console.error('Geocode fetch error:', err);
+            alert('Address search failed. Please try again.');
+          });
+      } catch (e) {
+        console.error('Search exception:', e);
+      }
+    }
+
+    function addSearchControl() {
+      var ctl = L.control({ position: 'bottomleft' });
+      ctl.onAdd = function() {
+        var div = L.DomUtil.create('div', 'search-ctl');
+
+        div.innerHTML =
+          '<button type="button" class="btn-locate">📍 My Location</button>' +
+          '<input type="text" class="addr" placeholder="Search address / place" />' +
+          '<button type="button" class="btn-go secondary">Go</button>' +
+          '<button type="button" class="btn-clear secondary">Clear</button>';
+
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+
+        var btnLocate = div.querySelector('.btn-locate');
+        var btnGo = div.querySelector('.btn-go');
+        var btnClear = div.querySelector('.btn-clear');
+        var input = div.querySelector('.addr');
+
+        btnLocate.addEventListener('click', function() {
+          locateMeSafe();
+        });
+
+        btnGo.addEventListener('click', function() {
+          searchAddressSafe(input.value);
+        });
+
+        btnClear.addEventListener('click', function() {
+          clearUserLocation();
+          if (input) input.value = '';
+        });
+
+        input.addEventListener('keydown', function(e){
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            searchAddressSafe(input.value);
+          }
+        });
+
+        return div;
+      };
+      ctl.addTo(map);
+    }
+
+    // add it immediately; does not affect CSV pipeline
+    addSearchControl();
 
     // CSVs from repo root (status = live, others = static)
     var CSV_URLS = [
@@ -182,7 +353,6 @@
 
     // ✅ Cluster layer instead of a normal layerGroup
     var clusterGroup = L.markerClusterGroup({
-      // tweak these if you want (optional)
       showCoverageOnHover: false,
       spiderfyOnMaxZoom: true,
       disableClusteringAtZoom: 17
@@ -239,7 +409,6 @@
     }
 
     function render() {
-      // ✅ Clear cluster instead of layerGroup
       clusterGroup.clearLayers();
       markers = [];
       var hasAny = false;
@@ -292,14 +461,12 @@
         var marker = L.marker([lat, lon], { icon: icon })
           .bindPopup(makePopup(name, statusNorm, lat, lon, countsHtml, descText));
 
-        // ✅ Add to cluster group
         clusterGroup.addLayer(marker);
         markers.push(marker);
         hasAny = true;
       });
 
       if (hasAny) {
-        // Fit to clusters
         var b = clusterGroup.getBounds();
         if (b && b.isValid()) map.fitBounds(b.pad(0.15));
       }
@@ -318,7 +485,6 @@
           '<label><input type="checkbox" data-k="In Use" checked/> In Use</label>' +
           '<label><input type="checkbox" data-k="Unreachable" checked/> Unreachable</label>';
 
-        // prevent map drag/zoom when using the control
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
 
